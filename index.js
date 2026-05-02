@@ -1,3 +1,5 @@
+const ADMIN_ID = "8294043060"; // your Telegram ID
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -14,6 +16,16 @@ const io = new Server(server, {
 const rooms = {};
 const CALL_INTERVAL = 5000;
 
+// =======================
+// 👑 ADMIN HELPER
+// =======================
+function isAdmin(userId) {
+  return String(userId) === ADMIN_ID;
+}
+
+// =======================
+// FORMAT NUMBER
+// =======================
 function formatCallNumber(n) {
   if (n <= 15) return `B-${n}`;
   if (n <= 30) return `I-${n}`;
@@ -22,10 +34,12 @@ function formatCallNumber(n) {
   return `O-${n}`;
 }
 
+// =======================
+// WIN CHECK
+// =======================
 function checkWin(marked) {
   const size = 5;
 
-  // rows
   for (let r = 0; r < size; r++) {
     let win = true;
     for (let c = 0; c < size; c++) {
@@ -34,7 +48,6 @@ function checkWin(marked) {
     if (win) return true;
   }
 
-  // columns
   for (let c = 0; c < size; c++) {
     let win = true;
     for (let r = 0; r < size; r++) {
@@ -43,14 +56,12 @@ function checkWin(marked) {
     if (win) return true;
   }
 
-  // diagonal TL-BR
   let d1 = true;
   for (let i = 0; i < size; i++) {
     if (!marked[i * 5 + i]) d1 = false;
   }
   if (d1) return true;
 
-  // diagonal TR-BL
   let d2 = true;
   for (let i = 0; i < size; i++) {
     if (!marked[i * 5 + (4 - i)]) d2 = false;
@@ -60,10 +71,14 @@ function checkWin(marked) {
   return false;
 }
 
-// START GAME
-function startGame(roomId) {
+// =======================
+// START GAME (ADMIN ONLY)
+// =======================
+function startGame(roomId, userId) {
   const room = rooms[roomId];
   if (!room || room.timer || room.state === "running") return;
+
+  if (!isAdmin(userId)) return;
 
   room.called = [];
   room.state = "running";
@@ -95,10 +110,14 @@ function startGame(roomId) {
   }, CALL_INTERVAL);
 }
 
-// END GAME
-function endGame(roomId) {
+// =======================
+// END GAME (ADMIN ONLY)
+// =======================
+function endGame(roomId, userId) {
   const room = rooms[roomId];
   if (!room) return;
+
+  if (!isAdmin(userId)) return;
 
   if (room.timer) {
     clearInterval(room.timer);
@@ -109,7 +128,9 @@ function endGame(roomId) {
   io.to(roomId).emit("gameState", "ended");
 }
 
+// =======================
 // SOCKETS
+// =======================
 io.on("connection", (socket) => {
 
   socket.on("joinRoom", ({ roomId, user }) => {
@@ -125,19 +146,36 @@ io.on("connection", (socket) => {
       };
     }
 
-    rooms[roomId].players.push({ id: socket.id, user });
+    const role = isAdmin(user.id) ? "admin" : "player";
+
+    rooms[roomId].players.push({
+      id: socket.id,
+      user,
+      role
+    });
+
+    socket.emit("role", { role });
 
     io.to(roomId).emit("roomUpdate", rooms[roomId]);
   });
 
-  socket.on("startGame", (roomId) => {
-    startGame(roomId);
+  // =======================
+  // START GAME EVENT
+  // =======================
+  socket.on("startGame", ({ roomId, userId }) => {
+    startGame(roomId, userId);
   });
 
-  socket.on("endGame", (roomId) => {
-    endGame(roomId);
+  // =======================
+  // END GAME EVENT
+  // =======================
+  socket.on("endGame", ({ roomId, userId }) => {
+    endGame(roomId, userId);
   });
 
+  // =======================
+  // CLAIM BINGO
+  // =======================
   socket.on("claimBingo", ({ roomId, marked }) => {
     const room = rooms[roomId];
     if (!room || room.state !== "running") return;
