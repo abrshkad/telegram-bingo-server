@@ -15,26 +15,59 @@ app.get("/", (req, res) => {
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*"
-  }
+  cors: { origin: "*" }
 });
 
 const rooms = {};
+const CALL_INTERVAL = 5000;
 
 function isAdmin(id) {
   return String(id) === String(ADMIN_ID);
 }
 
-io.on("connection", (socket) => {
-  console.log("connected:", socket.id);
+function formatNumber(n) {
+  if (n <= 15) return `B-${n}`;
+  if (n <= 30) return `I-${n}`;
+  if (n <= 45) return `N-${n}`;
+  if (n <= 60) return `G-${n}`;
+  return `O-${n}`;
+}
 
+function startGame(roomId) {
+  const room = rooms[roomId];
+  if (!room || room.timer) return;
+
+  room.called = [];
+
+  io.to(roomId).emit("gameStarted");
+
+  room.timer = setInterval(() => {
+    if (room.called.length >= 75) {
+      clearInterval(room.timer);
+      room.timer = null;
+      return;
+    }
+
+    let n;
+    do {
+      n = Math.floor(Math.random() * 75) + 1;
+    } while (room.called.includes(n));
+
+    room.called.push(n);
+
+    io.to(roomId).emit("numberCalled", formatNumber(n));
+  }, CALL_INTERVAL);
+}
+
+io.on("connection", (socket) => {
   socket.on("joinRoom", ({ roomId, user }) => {
     socket.join(roomId);
 
     if (!rooms[roomId]) {
       rooms[roomId] = {
-        players: []
+        players: [],
+        called: [],
+        timer: null
       };
     }
 
@@ -51,11 +84,12 @@ io.on("connection", (socket) => {
     socket.emit("role", { role });
 
     io.to(roomId).emit("roomUpdate", rooms[roomId]);
+  });
 
-    console.log(user.name, "joined as", role);
+  socket.on("startGame", ({ roomId, userId }) => {
+    if (!isAdmin(userId)) return;
+    startGame(roomId);
   });
 });
 
-server.listen(3000, () => {
-  console.log("running on 3000");
-});
+server.listen(3000);
