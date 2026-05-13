@@ -2,9 +2,14 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-const supabase = require("./supabase");
+const { createClient } = require("@supabase/supabase-js");
 
 const ADMIN_ID = "8294043060";
+
+const supabase = createClient(
+  "https://rrrrmbdlwrzsqqgpayxe.supabase.co",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJycnJtYmRsd3J6c3FxZ3BheXhlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg2ODU3MDAsImV4cCI6MjA5NDI2MTcwMH0.WR_sBEPAJA_-g9htyQ5cvVLJZNPar44w45-tngOELd8"
+);
 
 const app = express();
 app.use(cors());
@@ -17,14 +22,10 @@ const io = new Server(server, {
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("Bingo server running");
-});
-
 const rooms = {};
 
 function isAdmin(id) {
-  return String(id) === String(ADMIN_ID);
+  return String(id) === ADMIN_ID;
 }
 
 function generateCard() {
@@ -49,136 +50,102 @@ function formatNumber(n) {
   return `O-${n}`;
 }
 
-function checkWin(marked) {
-  const lines = [
-    [0,1,2,3,4],
-    [5,6,7,8,9],
-    [10,11,12,13,14],
-    [15,16,17,18,19],
-    [20,21,22,23,24],
-
-    [0,5,10,15,20],
-    [1,6,11,16,21],
-    [2,7,12,17,22],
-    [3,8,13,18,23],
-    [4,9,14,19,24],
-
-    [0,6,12,18,24],
-    [4,8,12,16,20]
-  ];
-
-  return lines.some(line =>
-    line.every(i => marked[i])
-  );
-}
-
-async function getPlayer(user) {
-  const { data } = await supabase
-    .from("players")
-    .select("*")
-    .eq("telegram_id", String(user.id))
-    .single();
-
-  return data;
-}
-
-async function createPlayer(user) {
-  await supabase.from("players").insert({
-    telegram_id: String(user.id),
-    name: user.name,
-    score: 0
-  });
-}
-
-async function updateScore(userId, amount) {
-  const player = await getPlayer({ id: userId });
-
-  if (!player) return;
-
-  await supabase
-    .from("players")
-    .update({
-      score: player.score + amount
-    })
-    .eq("telegram_id", String(userId));
-}
-
 io.on("connection", (socket) => {
 
   socket.on("joinRoom", async ({ roomId, user }) => {
 
     socket.join(roomId);
 
-    let player = await getPlayer(user);
-
-    if (!player) {
-      await createPlayer(user);
-      player = await getPlayer(user);
-    }
-
-    if (player.score <= 0 && !isAdmin(user.id)) {
-      socket.emit("noScore");
-      return;
-    }
-
     if (!rooms[roomId]) {
       rooms[roomId] = {
         players: [],
-        state: "waiting",
         called: [],
-        timer: null,
-        winner: null,
-        usedCards: []
+        gameRunning: false,
+        interval: null,
+        winnerPrize: 50,
+        joinCost: 10
       };
     }
 
     const room = rooms[roomId];
 
+    let { data: player } = await supabase
+      .from("players")
+      .select("*")
+      .eq("telegram_id", String(user.id))
+      .single();
+
+    if (!player) {
+      await supabase.from("players").insert({
+        telegram_id: String(user.id),
+        name: user.name,
+        score: 100
+      });
+
+      player = {
+        telegram_id: String(user.id),
+        name: user.name,
+        score: 100
+      };
+    }
+
+    if (player.score < room.joinCost) {
+      socket.emit("notEnoughScore");
+      return;
+    }
+
+    await supabase
+      .from("players")
+      .update({
+        score: player.score - room.joinCost
+      })
+      .eq("telegram_id", String(user.id));
+
     let card;
 
-    do {
-      card = generateCard();
-    } while (
-      room.usedCards.some(
-        c => JSON.stringify(c) === JSON.stringify(card)
-      )
-    );
+    while (true) {
 
-    room.usedCards.push(card);
+      card = generateCard();
+
+      const duplicate = room.players.find(p =>
+        JSON.stringify(p.card) === JSON.stringify(card)
+      );
+
+      if (!duplicate) break;
+    }
 
     room.players.push({
       socketId: socket.id,
       user,
-      card
+      card,
+      marked: []
     });
 
     socket.emit("yourCard", card);
+
+    socket.emit("yourScore", player.score - room.joinCost);
 
     socket.emit("role", {
       role: isAdmin(user.id) ? "admin" : "player"
     });
 
-    socket.emit("score", player.score);
+    io.to(roomId).emit("roomPlayers", room.players);
 
-    io.to(roomId).emit("roomUpdate", room.players);
   });
 
-  socket.on("setScore", async ({ targetId, amount, adminId }) => {
+  socket.on("setSettings", ({ roomId, joinCost, winnerPrize, userId }) => {
 
-    if (!isAdmin(adminId)) return;
+    if (!isAdmin(userId)) return;
 
-    const player = await getPlayer({ id: targetId });
+    const room = rooms[roomId];
 
-    if (!player) return;
+    room.joinCost = joinCost;
+    room.winnerPrize = winnerPrize;
 
-    await supabase
-      .from("players")
-      .update({
-        score: amount
-      })
-      .eq("telegram_id", String(targetId));
-
-    io.emit("scoreUpdated");
+    io.to(roomId).emit("settingsUpdated", {
+      joinCost,
+      winnerPrize
+    });
   });
 
   socket.on("startGame", ({ roomId, userId }) => {
@@ -187,17 +154,17 @@ io.on("connection", (socket) => {
 
     const room = rooms[roomId];
 
-    if (!room) return;
+    if (room.gameRunning) return;
 
-    room.state = "running";
+    room.gameRunning = true;
     room.called = [];
 
-    io.to(roomId).emit("gameState", "running");
+    io.to(roomId).emit("gameStarted");
 
-    room.timer = setInterval(() => {
+    room.interval = setInterval(() => {
 
       if (room.called.length >= 75) {
-        clearInterval(room.timer);
+        clearInterval(room.interval);
         return;
       }
 
@@ -209,43 +176,50 @@ io.on("connection", (socket) => {
 
       room.called.push(n);
 
-      io.to(roomId).emit("numberCalled", {
+      io.to(roomId).emit("newNumber", {
         current: formatNumber(n),
         history: room.called.map(formatNumber).reverse()
       });
 
-    }, 4000);
+    }, 5000);
 
   });
 
-  socket.on("claimBingo", async ({ roomId, marked, userId }) => {
+  socket.on("claimBingo", async ({ roomId, userId }) => {
 
     const room = rooms[roomId];
 
-    if (!room) return;
+    if (!room.gameRunning) return;
 
-    const valid = checkWin(marked);
+    clearInterval(room.interval);
 
-    if (!valid) {
-      socket.emit("invalidBingo");
-      return;
-    }
+    room.gameRunning = false;
 
-    clearInterval(room.timer);
+    const { data: player } = await supabase
+      .from("players")
+      .select("*")
+      .eq("telegram_id", String(userId))
+      .single();
 
-    room.state = "ended";
+    await supabase
+      .from("players")
+      .update({
+        score: player.score + room.winnerPrize
+      })
+      .eq("telegram_id", String(userId));
 
-    await updateScore(userId, 10);
+    io.to(roomId).emit("winner", {
+      userId
+    });
 
-    socket.emit("youWon");
-
-    io.to(roomId).emit("winner", userId);
   });
 
 });
 
-const PORT = process.env.PORT || 3000;
+app.get("/", (req, res) => {
+  res.send("Bingo server running");
+});
 
-server.listen(PORT, () => {
-  console.log("SERVER STARTED");
+server.listen(3000, () => {
+  console.log("server running");
 });
